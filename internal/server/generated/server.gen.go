@@ -30,10 +30,10 @@ type ServerInterface interface {
 	// (GET /team/get)
 	GetTeamGet(w http.ResponseWriter, r *http.Request, params GetTeamGetParams)
 	// Получить PR'ы, где пользователь назначен ревьювером
-	// (GET /users/getReview)
+	// (GET /user/getReview)
 	GetUsersGetReview(w http.ResponseWriter, r *http.Request, params GetUsersGetReviewParams)
 	// Установить флаг активности пользователя
-	// (POST /users/setIsActive)
+	// (POST /user/setIsActive)
 	PostUsersSetIsActive(w http.ResponseWriter, r *http.Request)
 }
 
@@ -72,13 +72,13 @@ func (_ Unimplemented) GetTeamGet(w http.ResponseWriter, r *http.Request, params
 }
 
 // Получить PR'ы, где пользователь назначен ревьювером
-// (GET /users/getReview)
+// (GET /user/getReview)
 func (_ Unimplemented) GetUsersGetReview(w http.ResponseWriter, r *http.Request, params GetUsersGetReviewParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
 // Установить флаг активности пользователя
-// (POST /users/setIsActive)
+// (POST /user/setIsActive)
 func (_ Unimplemented) PostUsersSetIsActive(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
@@ -382,10 +382,10 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/team/get", wrapper.GetTeamGet)
 	})
 	r.Group(func(r chi.Router) {
-		r.Get(options.BaseURL+"/users/getReview", wrapper.GetUsersGetReview)
+		r.Get(options.BaseURL+"/user/getReview", wrapper.GetUsersGetReview)
 	})
 	r.Group(func(r chi.Router) {
-		r.Post(options.BaseURL+"/users/setIsActive", wrapper.PostUsersSetIsActive)
+		r.Post(options.BaseURL+"/user/setIsActive", wrapper.PostUsersSetIsActive)
 	})
 
 	return r

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/url"
+	"pull_requests_service/pkg/logx"
 	"sync"
 	"time"
 
