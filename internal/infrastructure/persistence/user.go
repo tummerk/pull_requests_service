@@ -72,3 +72,34 @@ func (r *UserRepository) SetIsActive(ctx context.Context, userId string, isActiv
 
 	return updatedUser, nil
 }
+
+func (r *UserRepository) GetReviewers(ctx context.Context, authorID string) ([]user.User, error) {
+	query := `
+        SELECT
+			u2.id,
+			u2.username,
+			u2.is_active,
+			u2.team_name,
+			u2.created_at
+		FROM
+			users AS u1
+		JOIN
+			users AS u2 ON u1.team_name = u2.team_name
+		WHERE
+			u1.id = $1
+			AND u2.is_active = TRUE
+			AND u2.id != u1.id
+		ORDER BY
+			RANDOM() 
+		LIMIT 2;
+    `
+
+	var candidates []user.User
+
+	err := r.db.SelectContext(ctx, &candidates, query, authorID)
+	if err != nil {
+		return nil, fmt.Errorf("repository: failed to get active team candidates: %w", err)
+	}
+
+	return candidates, nil
+}

@@ -4,9 +4,10 @@ const statusOpen = "OPEN"
 const statusMerged = "MERGED"
 
 type PullRequest struct {
-	id                int
-	name              string
-	authorId          int
-	status            string
-	needMoreReviewers bool
+	Id                string
+	Name              string
+	AuthorId          string
+	Status            string
+	NeedMoreReviewers bool
+	AssignedReviewers []string
 }

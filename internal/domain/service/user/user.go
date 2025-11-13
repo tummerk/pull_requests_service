@@ -9,6 +9,8 @@ type UserRepository interface {
 	Create(ctx context.Context, user entity.User) (entity.User, error)
 	GetByTeam(ctx context.Context, team string) ([]entity.User, error)
 	SetIsActive(ctx context.Context, userId string, isActive bool) (entity.User, error)
+	GetById(ctx context.Context, userId string) (entity.User, error)
+	GetActiveTeamCandidatesId(ctx context.Context, authorID string) ([]string, error)
 }
 
 type UserService struct {
