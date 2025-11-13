@@ -7,14 +7,15 @@ import (
 	"pull_requests_service/pkg/errcodes"
 )
 
-type PullRequestsRepository interface {
+type PullRequestRepository interface {
 	CreateWithReviewers(ctx context.Context, pr *entity.PullRequest, reviewerIDs []string) error
 	Merge(ctx context.Context, prId string) (entity.PullRequest, error)
+	Reassign(ctx context.Context, prId, oldReviewerId string) (entity.PullRequest, string, error)
 }
 
 type PullRequestService struct {
 	UserRepository         service.UserRepository
-	PullRequestsRepository PullRequestsRepository
+	PullRequestsRepository PullRequestRepository
 }
 
 func (s *PullRequestService) CreatePullRequest(ctx context.Context, pr entity.PullRequest) (entity.PullRequest, error) {
@@ -38,4 +39,12 @@ func (s *PullRequestService) Merge(ctx context.Context, prId string) (entity.Pul
 		return entity.PullRequest{}, err
 	}
 	return pr, nil
+}
+
+func (s *PullRequestService) Reassign(ctx context.Context, prId string, oldId string) (entity.PullRequest, string, error) {
+	pr, newId, err := s.PullRequestsRepository.Reassign(ctx, prId, oldId)
+	if err != nil {
+		logger(ctx).Error("error creating pull requests: %s", errcodes.NotFound)
+	}
+	return pr, newId, err
 }

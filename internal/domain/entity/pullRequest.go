@@ -1,7 +1,9 @@
 package entity
 
-const statusOpen = "OPEN"
-const statusMerged = "MERGED"
+import "time"
+
+const StatusOpen = "OPEN"
+const StatusMerged = "MERGED"
 
 type PullRequest struct {
 	Id                string
@@ -10,4 +12,5 @@ type PullRequest struct {
 	Status            string
 	NeedMoreReviewers bool
 	AssignedReviewers []string
+	MergedAt          time.Time
 }

@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
@@ -9,7 +10,6 @@ import (
 	"pull_requests_service/internal/domain"
 	"pull_requests_service/internal/domain/entity"
 	"pull_requests_service/pkg/errcodes"
-	"time"
 )
 
 type PullRequestRepository struct {
@@ -20,10 +20,10 @@ func NewPullRequestRepository(db *sqlx.DB) *PullRequestRepository {
 	return &PullRequestRepository{db: db}
 }
 
-func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *entity.PullRequest, reviewerIDs []string) (*entity.PullRequest, error) {
+func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *entity.PullRequest, reviewerIDs []string) error {
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
-		return nil, domain.WrapError(err, errcodes.InternalServerError, "failed to begin transaction")
+		return domain.WrapError(err, errcodes.InternalServerError, "failed to begin transaction")
 	}
 	defer tx.Rollback()
 
@@ -32,21 +32,19 @@ func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *ent
         VALUES ($1, $2, $3, $4)
         RETURNING id, name, author_id, status, created_at, merged_at;
     `
-	var createdPR entity.PullRequest
-	err = tx.GetContext(ctx, &createdPR, prQuery, pr.Id, pr.Name, pr.AuthorId, pr.Status)
+	err = tx.GetContext(ctx, pr, prQuery, pr.Id, pr.Name, pr.AuthorId, pr.Status)
 	if err != nil {
 		var pgErr *pq.Error
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return nil, domain.NewError(errcodes.PullRequestExists, fmt.Sprintf("pull request with id '%s' already exists", pr.Id))
+			return domain.NewError(errcodes.PullRequestExists, fmt.Sprintf("pull request with id '%s' already exists", pr.Id))
 		}
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-			return nil, domain.NewError(errcodes.NotFound, fmt.Sprintf("author with id '%s' not found", pr.AuthorId))
+			return domain.NewError(errcodes.NotFound, fmt.Sprintf("author with id '%s' not found", pr.AuthorId))
 		}
-		return nil, domain.WrapError(err, errcodes.InternalServerError, "failed to create pull request")
+		return domain.WrapError(err, errcodes.InternalServerError, "failed to create pull request")
 	}
 
 	if len(reviewerIDs) > 0 {
-
 		type reviewerLink struct {
 			PRID       string `db:"pr_id"`
 			ReviewerID string `db:"reviewer_id"`
@@ -55,7 +53,7 @@ func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *ent
 		links := make([]reviewerLink, len(reviewerIDs))
 		for i, reviewerID := range reviewerIDs {
 			links[i] = reviewerLink{
-				PRID:       createdPR.Id,
+				PRID:       pr.Id,
 				ReviewerID: reviewerID,
 			}
 		}
@@ -64,55 +62,116 @@ func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *ent
 		_, err = tx.NamedExecContext(ctx, assignQuery, links)
 		if err != nil {
 			var pgErr *pq.Error
-
 			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-				return nil, domain.NewError(errcodes.NotFound, "one of the reviewers not found")
+				return domain.NewError(errcodes.NotFound, "one of the reviewers not found")
 			}
-			return nil, domain.WrapError(err, errcodes.InternalServerError, "failed to assign reviewers")
+			return domain.WrapError(err, errcodes.InternalServerError, "failed to assign reviewers")
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, domain.WrapError(err, errcodes.InternalServerError, "failed to commit transaction")
+	if err = tx.Commit(); err != nil {
+		return domain.WrapError(err, errcodes.InternalServerError, "failed to commit transaction")
 	}
-	createdPR.AssignedReviewers = reviewerIDs
-
-	return &createdPR, nil
+	pr.AssignedReviewers = reviewerIDs
+	return nil
 }
-
-func (r *pullRequestRepository) Merge(ctx context.Context, prId string) (entity.PullRequest, error) {
+func (r *PullRequestRepository) Merge(ctx context.Context, prId string) (entity.PullRequest, error) {
 	var pr entity.PullRequest
-
-	queryGet := `SELECT id, is_merged, merged_at FROM pull_requests WHERE id = $1`
-	err := r.db.GetContext(ctx, &pr, queryGet, prId)
-	if err != nil {
-		if errors.Is(err, sqlx.ErrNoRows) { // sqlx имеет собственный ErrNoRows (совместим с стандартным)
-			return entity.PullRequest{}, fmt.Errorf("merge: %w", errcodes.NotFound)
-		}
-		return entity.PullRequest{}, fmt.Errorf("failed to fetch pr %s: %w", prId, err)
-	}
-
-	if pr.IsMerged {
-		return entity.PullRequest{}, fmt.Errorf("pr %s is already merged", prId)
-	}
-
-
-	now := time.Now()
-	pr.Status =
-	pr. = &now
-
 	queryUpdate := `
 		UPDATE pull_requests
-		SET is_merged = \(1, merged_at = \)2
-		WHERE id = $3
-		RETURNING id, is_merged, merged_at` // Возвращаем обновленные данные
+		SET status = $1, updated_at = NOW(), merged_at = NOW()
+		WHERE id = $2 AND status = $3
+		RETURNING *`
 
-	// Используем QueryRowxContext для сканирования обновленного PR
-	err = r.db.QueryRowxContext(ctx, queryUpdate, pr.IsMerged, pr.MergedAt, prId).StructScan(&pr)
+	err := r.db.QueryRowxContext(ctx, queryUpdate, entity.StatusMerged, prId, entity.StatusOpen).StructScan(&pr)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return entity.PullRequest{}, fmt.Errorf("failed to merge: pr %s not found or already merged", prId)
+		}
 		return entity.PullRequest{}, fmt.Errorf("failed to merge pr %s: %w", prId, err)
 	}
 
-	// Возвращаем уже слиянный PR
 	return pr, nil
+}
+
+func (r *PullRequestRepository) Reassign(ctx context.Context, prId, oldReviewerId string) (
+	entity.PullRequest, string, error) {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to begin transaction")
+	}
+	defer tx.Rollback()
+
+	var pr entity.PullRequest
+	prQuery := `SELECT id, name, author_id, status, created_at, merged_at FROM pull_requests WHERE id = $1 FOR UPDATE`
+	err = tx.GetContext(ctx, &pr, prQuery, prId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return entity.PullRequest{}, "", domain.NewError(errcodes.NotFound, "pull request not found")
+		}
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to get pull request")
+	}
+
+	if pr.Status == entity.StatusMerged {
+		return entity.PullRequest{}, "", domain.NewError(errcodes.PrMerged, "cannot reassign on merged PR")
+	}
+
+	err = tx.SelectContext(ctx, &pr.AssignedReviewers, `SELECT reviewer_id FROM pr_reviewers WHERE pr_id = $1`, prId)
+	if err != nil {
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to get current reviewers")
+	}
+	if pr.AssignedReviewers == nil {
+		pr.AssignedReviewers = []string{}
+	}
+
+	var newReviewerId string
+	findReviewerQuery := `
+		SELECT u.id
+		FROM users u
+		JOIN team_members tm ON u.id = tm.user_id
+		WHERE tm.team_name = (
+			SELECT tm2.team_name
+			FROM team_members tm2
+			WHERE tm2.user_id = $2
+		)
+		AND u.is_active = TRUE
+		AND u.id NOT IN (
+			SELECT reviewer_id FROM pr_reviewers WHERE pr_id = $1
+			UNION
+			SELECT author_id FROM pull_requests WHERE id = $1
+		)
+		ORDER BY RANDOM()
+		LIMIT 1`
+
+	err = tx.GetContext(ctx, &newReviewerId, findReviewerQuery, prId, oldReviewerId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return entity.PullRequest{}, "", domain.NewError(errcodes.NoCandidate, "old reviewer not assigned or no replacement candidate")
+		}
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to find replacement")
+	}
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM pr_reviewers WHERE pr_id = $1 AND reviewer_id = $2`, prId, oldReviewerId)
+	if err != nil {
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to remove old reviewer")
+	}
+
+	_, err = tx.ExecContext(ctx, `INSERT INTO pr_reviewers (pr_id, reviewer_id) VALUES ($1, $2)`, prId, newReviewerId)
+	if err != nil {
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to assign new reviewer")
+	}
+
+	updatedReviewers := make([]string, 0, len(pr.AssignedReviewers))
+	for _, reviewer := range pr.AssignedReviewers {
+		if reviewer != oldReviewerId {
+			updatedReviewers = append(updatedReviewers, reviewer)
+		}
+	}
+	pr.AssignedReviewers = append(updatedReviewers, newReviewerId)
+
+	if err = tx.Commit(); err != nil {
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to commit transaction")
+	}
+
+	return pr, newReviewerId, nil
 }
