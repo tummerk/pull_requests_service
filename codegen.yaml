@@ -1,0 +1,6 @@
+package: generated
+generate:
+  - types
+  - chi-server
+  - strict-server
+output: internal/server/generated/api.gen.go

@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"pull_requests_service/internal/domain/entity"
-	service "pull_requests_service/internal/domain/service/user"
 )
 
 type TeamRepository interface {
@@ -13,7 +12,7 @@ type TeamRepository interface {
 
 type TeamService struct {
 	Repository  TeamRepository
-	userService service.UserService
+	userService UserService
 }
 
 func (t *TeamService) TeamCreate(ctx context.Context, team entity.Team, users []entity.User) (

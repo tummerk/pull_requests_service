@@ -1,7 +1,7 @@
 package entity
 
 type User struct {
-	Id       int
+	Id       string
 	Name     string
 	IsActive bool
 	Team     string

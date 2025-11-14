@@ -3,49 +3,45 @@ package application
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"net"
 	"net/http"
 	"os/signal"
 	"pull_requests_service/internal/config"
-	"pull_requests_service/internal/domain/service/example"
+	"pull_requests_service/internal/domain/service"
 	"pull_requests_service/internal/infrastructure/persistence"
 	"pull_requests_service/internal/server"
 	"pull_requests_service/pkg/application/connectors"
 	"pull_requests_service/pkg/application/modules"
 	"pull_requests_service/pkg/contextx"
-	"pull_requests_service/pkg/logx"
 	"pull_requests_service/pkg/middlewarex"
 	"syscall"
 
-	"git.appkode.ru/pub/go/live/clock"
-	"git.appkode.ru/pub/go/live/xidgenerator"
-	"git.appkode.ru/pub/go/metrics"
-	"git.appkode.ru/pub/go/metrics/field"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/samber/lo"
-	"golang.org/x/sync/errgroup"
 )
 
 var logger = contextx.LoggerFromContextOrDefault //nolint:gochecknoglobals
 
 type App struct {
-	cfg            config.Config
-	clock          clock.Clock
-	xidGenerator   xidgenerator.Generator
-	metrics        *metrics.Metrics
-	slog           *connectors.Slog
-	postgres       *connectors.Postgres
-	probeServer    modules.ProbeServer
-	metricServer   modules.MetricServer
-	httpServer     modules.HTTPServer
-	exampleService example.Service
-	exampleRepo    persistence.Example
+	cfg        config.Config
+	slog       *connectors.Slog
+	postgres   *connectors.Postgres
+	httpServer modules.HTTPServer
+
+	userRepo *persistence.UserRepository
+	teamRepo *persistence.TeamRepository
+	prRepo   *persistence.PullRequestRepository
+
+	userService *service.UserService
+	teamService *service.UserService
+	prService   *service.PullRequestService
 }
 
 func New(appVersion string) App {
-	const appName = "go-backend-example"
+	const appName = "pr_service"
 
 	cfg := lo.Must(config.Load())
 
@@ -56,13 +52,6 @@ func New(appVersion string) App {
 			Version: appVersion,
 			Debug:   cfg.Debug,
 		},
-		clock:        clock.New(),
-		xidGenerator: xidgenerator.New(),
-		metrics: metrics.NewMetrics(
-			field.NewName(appName),
-			field.NewEmptyName(),
-			field.NewVersion(appVersion),
-		),
 		postgres: &connectors.Postgres{
 			DSN:             cfg.Postgres.DSN,
 			MaxIdleConns:    cfg.Postgres.MaxIdleConns,
@@ -95,15 +84,13 @@ func (app App) Run() error {
 
 	logger(ctx).Info("config", slog.Any("config", app.cfg))
 
-	app.exampleRepo = persistence.NewExample(app.postgres.Client(ctx))
-	app.exampleService = example.NewService(app.exampleRepo)
+	client := app.postgres.Client(ctx)
+	app.userRepo = persistence.NewUserRepository(client)
+	app.teamRepo = persistence.NewTeamRepository(client)
+	app.prRepo = persistence.NewPullRequestRepository(client)
 
+	app.userService = service.NewUserService(app.userRepo)
 	g, ctx := errgroup.WithContext(ctx)
-
-	app.httpServer.Run(ctx, g, app.newHTTPServer(ctx, app.exampleService))
-	app.metricServer.Run(ctx, g)
-	app.probeServer.Run(ctx, g)
-
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("g.Wait: %w", err)
 	}
@@ -116,11 +103,7 @@ func (app App) newHTTPServer(ctx context.Context, exampleService example.Service
 
 	router.Use(
 		middleware.RealIP,
-		middlewarex.TraceID,
 		middlewarex.Logger,
-		middlewarex.RequestLogging(app.newSensitiveDataMasker(), app.cfg.Log.FieldMaxLen),
-		middlewarex.ResponseLogging(app.newSensitiveDataMasker(), app.cfg.Log.FieldMaxLen),
-		middlewarex.Recovery,
 	)
 
 	server.NewServer(
@@ -139,12 +122,4 @@ func (app App) newHTTPServer(ctx context.Context, exampleService example.Service
 		IdleTimeout:       app.cfg.HTTP.IdleTimeout,
 		Handler:           router,
 	}
-}
-
-func (app App) newSensitiveDataMasker() logx.SensitiveDataMaskerInterface {
-	if !app.cfg.Log.SensitiveDataMasker.Enabled {
-		return logx.NewNopSensitiveDataMasker()
-	}
-
-	return logx.NewSensitiveDataMasker()
 }

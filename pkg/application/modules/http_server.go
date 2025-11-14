@@ -6,15 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"pull_requests_service/pkg/logx"
 	"time"
 
 	"golang.org/x/sync/errgroup"
-
-	"go-backend-example/pkg/logx"
 )
 
-// HTTPServer модуль, ответственный за запуск и остановку HTTP-сервера
-// (graceful shutdown).
 type HTTPServer struct {
 	ShutdownTimeout time.Duration
 }
