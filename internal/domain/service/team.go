@@ -2,7 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"pull_requests_service/internal/domain"
 	"pull_requests_service/internal/domain/entity"
+	"pull_requests_service/pkg/errcodes"
 )
 
 type TeamRepository interface {
@@ -11,38 +15,59 @@ type TeamRepository interface {
 }
 
 type TeamService struct {
-	Repository  TeamRepository
-	userService UserService
+	teamRepo TeamRepository
+	userRepo UserRepository
 }
 
-func (t *TeamService) TeamCreate(ctx context.Context, team entity.Team, users []entity.User) (
-	entity.Team, []entity.User, error) {
-	team, err := t.Repository.Create(ctx, team)
-	if err != nil {
-		logger(ctx).Error(err.Error())
-		return entity.Team{}, []entity.User{}, err
+func NewTeamService(teamRepo TeamRepository, userRepo UserRepository) *TeamService {
+	return &TeamService{
+		teamRepo: teamRepo,
+		userRepo: userRepo,
 	}
-	for i := range users {
-		users[i].Team = team.Name
-		users[i], err = t.userService.CreateUser(ctx, users[i])
-		if err != nil {
-			logger(ctx).Error(err.Error())
-			return entity.Team{}, []entity.User{}, err
+}
+
+func (s *TeamService) TeamCreate(ctx context.Context, team entity.Team, users []entity.User) (entity.Team, []entity.User, error) {
+	createdTeam, err := s.teamRepo.Create(ctx, team)
+	if err != nil {
+		var appErr *domain.AppError
+		if errors.As(err, &appErr) {
+			return entity.Team{}, nil, err
 		}
+		return entity.Team{}, nil, domain.WrapError(err, errcodes.InternalServerError, "failed to create team")
 	}
-	return team, users, nil
+	createdUsers := make([]entity.User, len(users))
+	for i, user := range users {
+		user.Team = createdTeam.Name
+
+		createdUser, err := s.userRepo.Create(ctx, user)
+		if err != nil {
+			logger(ctx).Error("failed to create user in team creation process", "user_id", user.Id, "error", err)
+			var appErr *domain.AppError
+			if errors.As(err, &appErr) {
+				return entity.Team{}, nil, err
+			}
+			return entity.Team{}, nil, domain.WrapError(err, errcodes.InternalServerError, fmt.Sprintf("failed to create user '%s'", user.Id))
+		}
+		createdUsers[i] = createdUser
+	}
+
+	return createdTeam, createdUsers, nil
 }
 
-func (t *TeamService) TeamGet(ctx context.Context, name string) (entity.Team, []entity.User, error) {
-	team, err := t.Repository.Get(ctx, name)
+func (s *TeamService) TeamGet(ctx context.Context, name string) (entity.Team, []entity.User, error) {
+	team, err := s.teamRepo.Get(ctx, name)
 	if err != nil {
-		logger(ctx).Error(err.Error())
-		return entity.Team{}, []entity.User{}, err
+		var appErr *domain.AppError
+		if errors.As(err, &appErr) {
+			return entity.Team{}, nil, err
+		}
+		return entity.Team{}, nil, domain.WrapError(err, errcodes.InternalServerError, "failed to get team")
 	}
-	users, err := t.userService.GetByTeam(ctx, name)
+
+	users, err := s.userRepo.GetByTeam(ctx, name)
 	if err != nil {
-		logger(ctx).Error(err.Error())
-		return entity.Team{}, []entity.User{}, err
+		return entity.Team{}, nil, domain.WrapError(err, errcodes.InternalServerError, "failed to get users for team")
 	}
+
 	return team, users, nil
 }

@@ -1,23 +1,37 @@
 version: '3.8'
 
 services:
-  db:
-    image: postgres:15-alpine
-    container_name: reviewer-db
-    environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: pull_requests_service
     ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      - "${HOST_APP_PORT}:${HOST_APP_PORT}"
+    environment:
+      - HTTP_LISTEN_ADDRESS=${HTTP_LISTEN_ADDRESS}
+      - HTTP_WRITE_TIMEOUT=${HTTP_WRITE_TIMEOUT}
+      - HTTP_READ_TIMEOUT=${HTTP_READ_TIMEOUT}
+      - HTTP_IDLE_TIMEOUT=${HTTP_IDLE_TIMEOUT}
+      - HTTP_SHUTDOWN_TIMEOUT=${HTTP_SHUTDOWN_TIMEOUT}
+      - DB_DSN=postgres://${DB_USER}:${DB_PASSWORD}@db:${DB_PORT}/${DB_NAME}?sslmode=disable
+    depends_on:
+      - db
+
     restart: unless-stopped
 
+  db:
+    image: postgres:14-alpine
+    container_name: pr_service_db
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    ports:
+      - "${HOST_DB_PORT}:${DB_PORT}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
 volumes:
-  pgdata:
+  postgres_data:

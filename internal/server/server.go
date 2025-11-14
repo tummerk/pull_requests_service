@@ -102,7 +102,6 @@ func (s *Server) GetTeamGet(ctx context.Context, request generated.GetTeamGetReq
 	return response, nil
 }
 
-// ЗАГЛУШКИ ДЛЯ ОСТАЛЬНЫХ МЕТОДОВ (чтобы код компилировался)
 func (s *Server) PostPullRequestMerge(ctx context.Context, request generated.PostPullRequestMergeRequestObject) (generated.PostPullRequestMergeResponseObject, error) {
 	return nil, fmt.Errorf("not implemented")
 }

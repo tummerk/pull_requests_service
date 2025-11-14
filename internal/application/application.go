@@ -12,6 +12,7 @@ import (
 	"pull_requests_service/internal/domain/service"
 	"pull_requests_service/internal/infrastructure/persistence"
 	"pull_requests_service/internal/server"
+	"pull_requests_service/internal/server/generated"
 	"pull_requests_service/pkg/application/connectors"
 	"pull_requests_service/pkg/application/modules"
 	"pull_requests_service/pkg/contextx"
@@ -36,7 +37,7 @@ type App struct {
 	prRepo   *persistence.PullRequestRepository
 
 	userService *service.UserService
-	teamService *service.UserService
+	teamService *service.TeamService
 	prService   *service.PullRequestService
 }
 
@@ -90,15 +91,23 @@ func (app App) Run() error {
 	app.prRepo = persistence.NewPullRequestRepository(client)
 
 	app.userService = service.NewUserService(app.userRepo)
-	g, ctx := errgroup.WithContext(ctx)
+	app.teamService = service.NewTeamService(app.teamRepo, app.userRepo)
+	app.prService = service.NewPullRequestService(app.userRepo, app.prRepo)
+
+	g, gCtx := errgroup.WithContext(ctx)
+
+	httpSrv := app.newHTTPServer(gCtx)
+	app.httpServer.Run(gCtx, g, httpSrv)
+
 	if err := g.Wait(); err != nil {
-		return fmt.Errorf("g.Wait: %w", err)
+		return fmt.Errorf("errgroup wait: %w", err)
 	}
 
+	logger(gCtx).Info("application stopped gracefully")
 	return nil
 }
 
-func (app App) newHTTPServer(ctx context.Context, exampleService example.Service) *http.Server { //nolint:funlen,maintidx
+func (app App) newHTTPServer(ctx context.Context) *http.Server { //nolint:funlen,maintidx
 	router := chi.NewRouter()
 
 	router.Use(
@@ -106,9 +115,11 @@ func (app App) newHTTPServer(ctx context.Context, exampleService example.Service
 		middlewarex.Logger,
 	)
 
-	server.NewServer(
-		server.NewExampleServer(exampleService),
-	).RegisterRoutes(router)
+	server := server.NewServer(app.prService, app.teamService, app.userService)
+
+	handler := generated.NewStrictHandler(server, nil)
+
+	generated.HandlerFromMux(handler, router)
 
 	return &http.Server{
 		//nolint:exhaustruct

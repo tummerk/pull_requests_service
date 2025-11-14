@@ -20,6 +20,13 @@ type PullRequestService struct {
 	prRepo   PullRequestRepository
 }
 
+func NewPullRequestService(userRepo UserRepository, prRepo PullRequestRepository) *PullRequestService {
+	return &PullRequestService{
+		userRepo: userRepo,
+		prRepo:   prRepo,
+	}
+}
+
 func (s *PullRequestService) CreatePullRequest(ctx context.Context, pr entity.PullRequest) (entity.PullRequest, error) {
 	candidateIds, err := s.userRepo.GetActiveTeamCandidatesId(ctx, pr.AuthorId)
 	if err != nil {
