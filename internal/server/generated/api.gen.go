@@ -79,6 +79,11 @@ type PullRequestShort struct {
 // PullRequestShortStatus defines model for PullRequestShort.Status.
 type PullRequestShortStatus string
 
+// StatsResponse defines model for StatsResponse.
+type StatsResponse struct {
+	AssignmentsByUser *[]UserAssignmentStat `json:"assignments_by_user,omitempty"`
+}
+
 // Team defines model for Team.
 type Team struct {
 	Members  []TeamMember `json:"members"`
@@ -98,6 +103,14 @@ type User struct {
 	TeamName string `json:"team_name"`
 	UserId   string `json:"user_id"`
 	Username string `json:"username"`
+}
+
+// UserAssignmentStat defines model for UserAssignmentStat.
+type UserAssignmentStat struct {
+	// AssignmentCount Общее количество PR, на которые пользователь был назначен ревьюером.
+	AssignmentCount int32  `json:"assignment_count"`
+	UserId          string `json:"user_id"`
+	Username        string `json:"username"`
 }
 
 // TeamNameQuery defines model for TeamNameQuery.
@@ -174,6 +187,9 @@ type ServerInterface interface {
 	// Получить команду с участниками
 	// (GET /team/get)
 	GetTeamGet(w http.ResponseWriter, r *http.Request, params GetTeamGetParams)
+	// Получить статистику по назначениям пользователей
+	// (GET /user_stats)
+	GetUserStats(w http.ResponseWriter, r *http.Request)
 	// Получить PR'ы, где пользователь назначен ревьювером
 	// (GET /users/getReview)
 	GetUsersGetReview(w http.ResponseWriter, r *http.Request, params GetUsersGetReviewParams)
@@ -213,6 +229,12 @@ func (_ Unimplemented) PostTeamAdd(w http.ResponseWriter, r *http.Request) {
 // Получить команду с участниками
 // (GET /team/get)
 func (_ Unimplemented) GetTeamGet(w http.ResponseWriter, r *http.Request, params GetTeamGetParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Получить статистику по назначениям пользователей
+// (GET /user_stats)
+func (_ Unimplemented) GetUserStats(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -333,6 +355,21 @@ func (siw *ServerInterfaceWrapper) GetTeamGet(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetTeamGet(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// GetUserStats operation middleware
+func (siw *ServerInterfaceWrapper) GetUserStats(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUserStats(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -527,6 +564,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/team/get", wrapper.GetTeamGet)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/user_stats", wrapper.GetUserStats)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/users/getReview", wrapper.GetUsersGetReview)
 	})
 	r.Group(func(r chi.Router) {
@@ -695,6 +735,22 @@ func (response GetTeamGet404JSONResponse) VisitGetTeamGetResponse(w http.Respons
 	return json.NewEncoder(w).Encode(response)
 }
 
+type GetUserStatsRequestObject struct {
+}
+
+type GetUserStatsResponseObject interface {
+	VisitGetUserStatsResponse(w http.ResponseWriter) error
+}
+
+type GetUserStats200JSONResponse StatsResponse
+
+func (response GetUserStats200JSONResponse) VisitGetUserStatsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type GetUsersGetReviewRequestObject struct {
 	Params GetUsersGetReviewParams
 }
@@ -769,6 +825,9 @@ type StrictServerInterface interface {
 	// Получить команду с участниками
 	// (GET /team/get)
 	GetTeamGet(ctx context.Context, request GetTeamGetRequestObject) (GetTeamGetResponseObject, error)
+	// Получить статистику по назначениям пользователей
+	// (GET /user_stats)
+	GetUserStats(ctx context.Context, request GetUserStatsRequestObject) (GetUserStatsResponseObject, error)
 	// Получить PR'ы, где пользователь назначен ревьювером
 	// (GET /users/getReview)
 	GetUsersGetReview(ctx context.Context, request GetUsersGetReviewRequestObject) (GetUsersGetReviewResponseObject, error)
@@ -949,6 +1008,30 @@ func (sh *strictHandler) GetTeamGet(w http.ResponseWriter, r *http.Request, para
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetTeamGetResponseObject); ok {
 		if err := validResponse.VisitGetTeamGetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUserStats operation middleware
+func (sh *strictHandler) GetUserStats(w http.ResponseWriter, r *http.Request) {
+	var request GetUserStatsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUserStats(ctx, request.(GetUserStatsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUserStats")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUserStatsResponseObject); ok {
+		if err := validResponse.VisitGetUserStatsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

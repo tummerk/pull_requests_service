@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
-	"github.com/lib/pq"
+	"pull_requests_service/internal/domain"
 	"pull_requests_service/internal/domain/entity"
 	"pull_requests_service/pkg/errcodes"
 )
@@ -29,11 +30,11 @@ func (r *TeamRepository) Create(ctx context.Context, team entity.Team) (entity.T
 
 	err := r.db.GetContext(ctx, &createdTeam, query, team.Name)
 	if err != nil {
-		var pgErr *pq.Error
+		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return entity.Team{}, fmt.Errorf("repository.Create: %w. Team %s", errcodes.TeamAlreadyExists, team.Name)
+			return entity.Team{}, domain.NewError(errcodes.TeamAlreadyExists, fmt.Sprintf("team with name '%s' already exists", team.Name))
 		}
-		return entity.Team{}, fmt.Errorf("repository.Create: failed to create team: %w", err)
+		return entity.Team{}, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to create team")
 	}
 
 	return createdTeam, nil
@@ -47,9 +48,9 @@ func (r *TeamRepository) Get(ctx context.Context, name string) (entity.Team, err
 	err := r.db.GetContext(ctx, &foundTeam, query, name)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return entity.Team{}, fmt.Errorf("repository.Get: %w: team '%s'", errcodes.NotFound, name)
+			return entity.Team{}, domain.NewError(errcodes.NotFound, fmt.Sprintf("team with name '%s' not found", name))
 		}
-		return entity.Team{}, fmt.Errorf("repository.Get: failed to get team: %w", err)
+		return entity.Team{}, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to get team")
 	}
 	return foundTeam, nil
 }

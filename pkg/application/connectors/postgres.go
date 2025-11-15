@@ -2,13 +2,18 @@ package connectors
 
 import (
 	"context"
+	"errors"
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
+	_ "github.com/lib/pq"
 	"log/slog"
 	"net/url"
 	"pull_requests_service/pkg/logx"
 	"sync"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // golang postgres driver
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 	"github.com/samber/lo"
 )
@@ -48,4 +53,21 @@ func (p *Postgres) Close(ctx context.Context) {
 		"postgres disconnected",
 		slog.String("database", lo.Must(url.Parse(p.DSN)).Path),
 	)
+}
+
+func (p *Postgres) RunMigrations(ctx context.Context) error {
+	m, err := migrate.New("file://db/migrations", p.DSN)
+	if err != nil {
+		logger(ctx).Error("Error running migrations",
+			slog.String("error", err.Error()))
+		return err
+	}
+	defer m.Close()
+	if err = m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		logger(ctx).Error("Error running migrations",
+			slog.String("error", err.Error()))
+		return err
+	}
+	logger(ctx).Info("Successfully migrated migrations")
+	return nil
 }

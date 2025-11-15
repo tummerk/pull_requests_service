@@ -30,14 +30,13 @@ func isUniqueConstraintError(err error) bool {
 
 func (r *UserRepository) Create(ctx context.Context, user entity.User) (entity.User, error) {
 	query := `
-        INSERT INTO users (id, username, is_active, team_name)
-        VALUES (:id, :username, :is_active, :team_name)
+        INSERT INTO users (id, name, is_active, team_id)
+        VALUES (:id, :name, :is_active, :team_id)
         ON CONFLICT (id) DO UPDATE SET
-            username = EXCLUDED.username,
+            name = EXCLUDED.name,
             is_active = EXCLUDED.is_active,
-            team_name = EXCLUDED.team_name,
-			updated_at = CURRENT_TIMESTAMP
-        RETURNING id, username, is_active, team_name, created_at, updated_at;
+            team_id = EXCLUDED.team_id
+        RETURNING id, name, is_active, team_id, created_at;
     `
 
 	rows, err := r.db.NamedQueryContext(ctx, query, user)
@@ -61,7 +60,7 @@ func (r *UserRepository) Create(ctx context.Context, user entity.User) (entity.U
 }
 
 func (r *UserRepository) GetById(ctx context.Context, userId string) (entity.User, error) {
-	query := `SELECT id, username, is_active, team_name, created_at, updated_at FROM users WHERE id = $1`
+	query := `SELECT id, name, is_active, team_id, created_at FROM users WHERE id = $1`
 
 	var foundUser entity.User
 	err := r.db.GetContext(ctx, &foundUser, query, userId)
@@ -76,7 +75,7 @@ func (r *UserRepository) GetById(ctx context.Context, userId string) (entity.Use
 }
 
 func (r *UserRepository) GetByTeam(ctx context.Context, teamName string) ([]entity.User, error) {
-	query := `SELECT id, username, is_active, team_name, created_at, updated_at FROM users WHERE team_name = $1`
+	query := `SELECT id, name, is_active, team_id, created_at FROM users WHERE team_id = $1`
 
 	var users []entity.User
 	err := r.db.SelectContext(ctx, &users, query, teamName)
@@ -90,9 +89,9 @@ func (r *UserRepository) GetByTeam(ctx context.Context, teamName string) ([]enti
 func (r *UserRepository) SetIsActive(ctx context.Context, userId string, isActive bool) (entity.User, error) {
 	query := `
         UPDATE users
-        SET is_active = $1, updated_at = CURRENT_TIMESTAMP
+        SET is_active = $1
         WHERE id = $2
-        RETURNING id, username, is_active, team_name, created_at, updated_at;
+        RETURNING id, name, is_active, team_id, created_at;
     `
 
 	var updatedUser entity.User
@@ -108,24 +107,94 @@ func (r *UserRepository) SetIsActive(ctx context.Context, userId string, isActiv
 }
 
 func (r *UserRepository) GetActiveTeamCandidatesId(ctx context.Context, authorID string) ([]string, error) {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, domain.WrapError(err, errcodes.InternalServerError, "failed to begin transaction")
+	}
+	defer tx.Rollback()
+
+	var authorExists bool
+	checkQuery := `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`
+	err = tx.GetContext(ctx, &authorExists, checkQuery, authorID)
+	if err != nil {
+		return nil, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to check author existence")
+	}
+
+	if !authorExists {
+		return nil, domain.NewError(errcodes.NotFound, fmt.Sprintf("author with id '%s' not found", authorID))
+	}
+
 	query := `
-        WITH author_team AS (
-            SELECT team_name FROM users WHERE id = $1
-        )
         SELECT id
         FROM users
-        WHERE team_name = (SELECT team_name FROM author_team)
+        WHERE team_id = (SELECT team_id FROM users WHERE id = $1)
           AND is_active = TRUE
           AND id != $1
         ORDER BY RANDOM()
         LIMIT 2;
     `
-
 	var candidateIDs []string
-	err := r.db.SelectContext(ctx, &candidateIDs, query, authorID)
+	err = tx.SelectContext(ctx, &candidateIDs, query, authorID)
 	if err != nil {
 		return nil, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to get active team candidates")
 	}
 
+	// Вся остальная логика остается без изменений
+	if err = tx.Commit(); err != nil {
+		return nil, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to commit transaction")
+	}
+
 	return candidateIDs, nil
+}
+
+func (r *UserRepository) GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error) {
+	const query = `
+        SELECT
+            pr.id,
+            pr.name,
+            pr.author_id,
+            pr.status
+        FROM
+            pull_requests pr
+        WHERE
+            EXISTS (
+                SELECT 1
+                FROM pr_reviewers r
+                WHERE r.pull_request_id = pr.id AND r.reviewer_id = $1
+            )
+    `
+
+	var reviews []entity.PullRequest
+
+	err := r.db.SelectContext(ctx, &reviews, query, userId)
+	if err != nil {
+		return nil, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to get user reviews")
+	}
+
+	return reviews, nil
+}
+
+func (r *UserRepository) GetUserAssignmentStats(ctx context.Context) ([]entity.UserAssignmentStat, error) {
+	const query = `
+        SELECT
+            u.id AS user_id,
+            u.name AS username,
+            COUNT(pr.reviewer_id) AS assignment_count
+        FROM
+            users u
+        LEFT JOIN
+            pr_reviewers pr ON u.id = pr.reviewer_id
+        GROUP BY
+            u.id, u.name
+        ORDER BY
+            assignment_count DESC, u.name ASC;
+    `
+
+	var stats []entity.UserAssignmentStat
+
+	err := r.db.SelectContext(ctx, &stats, query)
+	if err != nil {
+		return nil, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to get user assignment stats")
+	}
+	return stats, nil
 }

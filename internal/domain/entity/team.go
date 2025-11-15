@@ -1,5 +1,8 @@
 package entity
 
+import "time"
+
 type Team struct {
-	Name string
+	Name      string    `db:"name"`
+	CreatedAt time.Time `db:"created_at"`
 }

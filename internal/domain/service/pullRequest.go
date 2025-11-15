@@ -36,12 +36,7 @@ func (s *PullRequestService) CreatePullRequest(ctx context.Context, pr entity.Pu
 		}
 		return entity.PullRequest{}, domain.WrapError(err, errcodes.InternalServerError, "failed to get team candidates")
 	}
-
-	if len(candidateIds) == 0 {
-		return entity.PullRequest{}, domain.NewError(errcodes.NoCandidate,
-			fmt.Sprintf("no active reviewers found for author %s's team", pr.AuthorId))
-	}
-
+	pr.Status = entity.StatusOpen
 	err = s.prRepo.CreateWithReviewers(ctx, &pr, candidateIds)
 	if err != nil {
 		var appErr *domain.AppError
@@ -50,7 +45,6 @@ func (s *PullRequestService) CreatePullRequest(ctx context.Context, pr entity.Pu
 		}
 		return entity.PullRequest{}, domain.WrapError(err, errcodes.InternalServerError, "failed to create pull request with reviewers")
 	}
-
 	return pr, nil
 }
 
@@ -64,7 +58,6 @@ func (s *PullRequestService) Merge(ctx context.Context, prId string) (entity.Pul
 		return entity.PullRequest{}, domain.WrapError(err, errcodes.InternalServerError,
 			fmt.Sprintf("failed to merge pull request %s", prId))
 	}
-
 	return mergedPR, nil
 }
 

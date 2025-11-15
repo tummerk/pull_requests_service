@@ -8,6 +8,7 @@ tags:
   - name: Users
   - name: PullRequests
   - name: Health
+  - name: Stats
 
 components:
   parameters:
@@ -120,8 +121,53 @@ components:
         status:
           type: string
           enum: [OPEN, MERGED]
+    UserAssignmentStat:
+      type: object
+      required:
+        - user_id
+        - username
+        - assignment_count
+      properties:
+        user_id:
+          type: string
+        username:
+          type: string
+        assignment_count:
+          type: integer
+          format: int32
+          description: Общее количество PR, на которые пользователь был назначен ревьюером.
+      example:
+        user_id: "u1"
+        username: "Alice"
+        assignment_count: 15
+    StatsResponse:
+        type: object
+        properties:
+          assignments_by_user:
+            type: array
+            items:
+              $ref: '#/components/schemas/UserAssignmentStat'
+        example:
+          assignments_by_user:
+            - user_id: "u1"
+              username: "Alice"
+              assignment_count: 15
+            - user_id: "u2"
+              username: "Bob"
+              assignment_count: 12
 
 paths:
+  /user_stats:
+    get:
+      tags: [ Stats ]
+      summary: Получить статистику по назначениям пользователей
+      responses:
+        '200':
+          description: Успешный ответ со статистикой
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
   /team/add:
     post:
       tags: [Teams]

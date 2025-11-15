@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"pull_requests_service/internal/domain"
@@ -28,20 +29,17 @@ func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *ent
 	defer tx.Rollback()
 
 	prQuery := `
-        INSERT INTO pull_requests (id, name, author_id, status)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO pull_requests (id, name, author_id,need_more_reviewers, status)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, name, author_id, status, created_at, merged_at;
     `
-	err = tx.GetContext(ctx, pr, prQuery, pr.Id, pr.Name, pr.AuthorId, pr.Status)
+	err = tx.GetContext(ctx, pr, prQuery, pr.Id, pr.Name, pr.AuthorId, len(reviewerIDs) < 2, pr.Status)
 	if err != nil {
-		var pgErr *pq.Error
+		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return domain.NewError(errcodes.PullRequestExists, fmt.Sprintf("pull request with id '%s' already exists", pr.Id))
+			return domain.NewError(errcodes.PullRequestExists, fmt.Sprintf("team with name '%s' already exists", pr.Name))
 		}
-		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-			return domain.NewError(errcodes.NotFound, fmt.Sprintf("author with id '%s' not found", pr.AuthorId))
-		}
-		return domain.WrapError(err, errcodes.InternalServerError, "failed to create pull request")
+		return domain.WrapError(err, errcodes.InternalServerError, "repository: failed to create team")
 	}
 
 	if len(reviewerIDs) > 0 {
@@ -58,7 +56,7 @@ func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *ent
 			}
 		}
 
-		assignQuery := `INSERT INTO pr_reviewers (pr_id, reviewer_id) VALUES (:pr_id, :reviewer_id)`
+		assignQuery := `INSERT INTO pr_reviewers (pull_request_id, reviewer_id) VALUES (:pr_id, :reviewer_id)`
 		_, err = tx.NamedExecContext(ctx, assignQuery, links)
 		if err != nil {
 			var pgErr *pq.Error
@@ -75,20 +73,33 @@ func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *ent
 	pr.AssignedReviewers = reviewerIDs
 	return nil
 }
+
 func (r *PullRequestRepository) Merge(ctx context.Context, prId string) (entity.PullRequest, error) {
 	var pr entity.PullRequest
 	queryUpdate := `
 		UPDATE pull_requests
 		SET status = $1, updated_at = NOW(), merged_at = NOW()
-		WHERE id = $2 AND status = $3
-		RETURNING *`
+		WHERE id = $2
+		RETURNING id, name, author_id, status, need_more_reviewers, created_at, merged_at;`
 
-	err := r.db.QueryRowxContext(ctx, queryUpdate, entity.StatusMerged, prId, entity.StatusOpen).StructScan(&pr)
+	err := r.db.QueryRowxContext(ctx, queryUpdate, entity.StatusMerged, prId).StructScan(&pr)
+
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return entity.PullRequest{}, fmt.Errorf("failed to merge: pr %s not found or already merged", prId)
+			return entity.PullRequest{}, domain.NewError(errcodes.NotFound,
+				fmt.Sprintf("pull request with id '%s' not found", prId))
 		}
-		return entity.PullRequest{}, fmt.Errorf("failed to merge pr %s: %w", prId, err)
+
+		return entity.PullRequest{}, domain.WrapError(err, errcodes.InternalServerError,
+			"repository: failed to execute merge update")
+	}
+
+	reviewersQuery := `SELECT reviewer_id FROM pr_reviewers WHERE pull_request_id = $1`
+
+	err = r.db.SelectContext(ctx, &pr.AssignedReviewers, reviewersQuery, prId)
+	if err != nil {
+		return entity.PullRequest{}, domain.WrapError(err, errcodes.InternalServerError,
+			"repository: failed to fetch reviewers for merged PR")
 	}
 
 	return pr, nil
@@ -96,6 +107,7 @@ func (r *PullRequestRepository) Merge(ctx context.Context, prId string) (entity.
 
 func (r *PullRequestRepository) Reassign(ctx context.Context, prId, oldReviewerId string) (
 	entity.PullRequest, string, error) {
+
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to begin transaction")
@@ -116,58 +128,71 @@ func (r *PullRequestRepository) Reassign(ctx context.Context, prId, oldReviewerI
 		return entity.PullRequest{}, "", domain.NewError(errcodes.PrMerged, "cannot reassign on merged PR")
 	}
 
-	err = tx.SelectContext(ctx, &pr.AssignedReviewers, `SELECT reviewer_id FROM pr_reviewers WHERE pr_id = $1`, prId)
+	var currentReviewers []string
+	err = tx.SelectContext(ctx, &currentReviewers, `SELECT reviewer_id FROM pr_reviewers WHERE pull_request_id = $1`, prId)
 	if err != nil {
 		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to get current reviewers")
 	}
-	if pr.AssignedReviewers == nil {
-		pr.AssignedReviewers = []string{}
+
+	oldReviewerFound := false
+	for _, reviewer := range currentReviewers {
+		if reviewer == oldReviewerId {
+			oldReviewerFound = true
+			break
+		}
+	}
+	if !oldReviewerFound {
+		return entity.PullRequest{}, "", domain.NewError(errcodes.NotAssigned, "old reviewer is not assigned to this pull request")
 	}
 
 	var newReviewerId string
 	findReviewerQuery := `
-		SELECT u.id
-		FROM users u
-		JOIN team_members tm ON u.id = tm.user_id
-		WHERE tm.team_name = (
-			SELECT tm2.team_name
-			FROM team_members tm2
-			WHERE tm2.user_id = $2
-		)
-		AND u.is_active = TRUE
-		AND u.id NOT IN (
-			SELECT reviewer_id FROM pr_reviewers WHERE pr_id = $1
-			UNION
-			SELECT author_id FROM pull_requests WHERE id = $1
-		)
-		ORDER BY RANDOM()
-		LIMIT 1`
+        SELECT u.id
+        FROM users u
+        WHERE u.team_id = (
+            SELECT team_id FROM users WHERE id = $2
+        )
+        AND u.is_active = TRUE
+        AND u.id != $2  
+        AND u.id NOT IN (
+            SELECT reviewer_id FROM pr_reviewers WHERE pull_request_id = $1
+            UNION
+            SELECT author_id FROM pull_requests WHERE id = $1
+        )
+        ORDER BY RANDOM()
+        LIMIT 1`
 
 	err = tx.GetContext(ctx, &newReviewerId, findReviewerQuery, prId, oldReviewerId)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return entity.PullRequest{}, "", domain.NewError(errcodes.NoCandidate, "old reviewer not assigned or no replacement candidate")
+			return entity.PullRequest{}, "", domain.NewError(errcodes.NoCandidate, "no replacement candidate found")
 		}
 		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to find replacement")
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM pr_reviewers WHERE pr_id = $1 AND reviewer_id = $2`, prId, oldReviewerId)
+	_, err = tx.ExecContext(ctx, `DELETE FROM pr_reviewers WHERE pull_request_id = $1 AND reviewer_id = $2`, prId, oldReviewerId)
 	if err != nil {
 		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to remove old reviewer")
 	}
 
-	_, err = tx.ExecContext(ctx, `INSERT INTO pr_reviewers (pr_id, reviewer_id) VALUES ($1, $2)`, prId, newReviewerId)
+	_, err = tx.ExecContext(ctx, `INSERT INTO pr_reviewers (pull_request_id, reviewer_id) VALUES ($1, $2)`, prId, newReviewerId)
 	if err != nil {
 		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to assign new reviewer")
 	}
 
-	updatedReviewers := make([]string, 0, len(pr.AssignedReviewers))
-	for _, reviewer := range pr.AssignedReviewers {
+	updatedReviewers := make([]string, 0, len(currentReviewers))
+	for _, reviewer := range currentReviewers {
 		if reviewer != oldReviewerId {
 			updatedReviewers = append(updatedReviewers, reviewer)
 		}
 	}
-	pr.AssignedReviewers = append(updatedReviewers, newReviewerId)
+	updatedReviewers = append(updatedReviewers, newReviewerId)
+	pr.AssignedReviewers = updatedReviewers
+
+	_, err = tx.ExecContext(ctx, `UPDATE pull_requests SET updated_at = CURRENT_TIMESTAMP WHERE id = $1`, prId)
+	if err != nil {
+		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to update pull request timestamp")
+	}
 
 	if err = tx.Commit(); err != nil {
 		return entity.PullRequest{}, "", domain.WrapError(err, errcodes.InternalServerError, "failed to commit transaction")

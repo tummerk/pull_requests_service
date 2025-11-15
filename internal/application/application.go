@@ -2,7 +2,7 @@ package application
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"net"
@@ -39,6 +39,7 @@ type App struct {
 	userService *service.UserService
 	teamService *service.TeamService
 	prService   *service.PullRequestService
+	statService *service.StatisticsService
 }
 
 func New(appVersion string) App {
@@ -86,6 +87,11 @@ func (app App) Run() error {
 	logger(ctx).Info("config", slog.Any("config", app.cfg))
 
 	client := app.postgres.Client(ctx)
+	err := app.postgres.RunMigrations(ctx)
+	if err != nil {
+		panic(err)
+	}
+
 	app.userRepo = persistence.NewUserRepository(client)
 	app.teamRepo = persistence.NewTeamRepository(client)
 	app.prRepo = persistence.NewPullRequestRepository(client)
@@ -93,15 +99,21 @@ func (app App) Run() error {
 	app.userService = service.NewUserService(app.userRepo)
 	app.teamService = service.NewTeamService(app.teamRepo, app.userRepo)
 	app.prService = service.NewPullRequestService(app.userRepo, app.prRepo)
+	app.statService = service.NewStatisticsService(app.userRepo)
 
 	g, gCtx := errgroup.WithContext(ctx)
 
 	httpSrv := app.newHTTPServer(gCtx)
 	app.httpServer.Run(gCtx, g, httpSrv)
 
-	if err := g.Wait(); err != nil {
-		return fmt.Errorf("errgroup wait: %w", err)
+	if err = g.Wait(); err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
+			logger(gCtx).Error("errgroup wait error", slog.Any("error", err))
+		}
 	}
+
+	logger(gCtx).Info("shutting down application...")
+	app.shutdown(context.Background())
 
 	logger(gCtx).Info("application stopped gracefully")
 	return nil
@@ -115,7 +127,7 @@ func (app App) newHTTPServer(ctx context.Context) *http.Server { //nolint:funlen
 		middlewarex.Logger,
 	)
 
-	server := server.NewServer(app.prService, app.teamService, app.userService)
+	server := server.NewServer(app.prService, app.teamService, app.userService, app.statService)
 
 	handler := generated.NewStrictHandler(server, nil)
 

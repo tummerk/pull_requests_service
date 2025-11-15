@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"pull_requests_service/internal/domain"
 	"pull_requests_service/internal/domain/entity"
 	"pull_requests_service/internal/server/generated"
@@ -24,26 +23,33 @@ type TeamService interface {
 
 // UserService определяет бизнес-логику для работы с пользователями.
 type UserService interface {
-	CreateUser(ctx context.Context, user entity.User) (entity.User, error)
-	GetByTeam(ctx context.Context, team string) ([]entity.User, error)
 	SetIsActive(ctx context.Context, userId string, isActive bool) (entity.User, error)
+	GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error)
+}
+
+type StatsService interface {
+	GetUserAssignmentStats(ctx context.Context) ([]entity.UserAssignmentStat, error)
 }
 
 type Server struct {
-	prService   PullRequestService
-	teamService TeamService
-	userService UserService
+	prService    PullRequestService
+	teamService  TeamService
+	userService  UserService
+	statsService StatsService
 }
 
-func NewServer(prSvc PullRequestService, teamSvc TeamService, userSvc UserService) *Server {
+func NewServer(prSvc PullRequestService, teamSvc TeamService, userSvc UserService, statSvc StatsService) *Server {
 	return &Server{
-		prService:   prSvc,
-		teamService: teamSvc,
-		userService: userSvc,
+		prService:    prSvc,
+		teamService:  teamSvc,
+		userService:  userSvc,
+		statsService: statSvc,
 	}
 }
 
-func (s *Server) PostPullRequestCreate(ctx context.Context, request generated.PostPullRequestCreateRequestObject) (generated.PostPullRequestCreateResponseObject, error) {
+func (s *Server) PostPullRequestCreate(ctx context.Context,
+	request generated.PostPullRequestCreateRequestObject) (generated.PostPullRequestCreateResponseObject, error) {
+
 	prToCreate := entity.PullRequest{
 		Id:       request.Body.PullRequestId,
 		Name:     request.Body.PullRequestName,
@@ -52,9 +58,27 @@ func (s *Server) PostPullRequestCreate(ctx context.Context, request generated.Po
 
 	createdPR, err := s.prService.CreatePullRequest(ctx, prToCreate)
 	if err != nil {
-
+		var appErr *domain.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errcodes.NotFound:
+				return generated.PostPullRequestCreate404JSONResponse{
+					Error: struct {
+						Code    generated.ErrorResponseErrorCode `json:"code"`
+						Message string                           `json:"message"`
+					}{Code: generated.NOTFOUND, Message: appErr.Message},
+				}, nil
+			case errcodes.PullRequestExists:
+				return generated.PostPullRequestCreate409JSONResponse{
+					Error: struct {
+						Code    generated.ErrorResponseErrorCode `json:"code"`
+						Message string                           `json:"message"`
+					}{Code: generated.PREXISTS, Message: appErr.Message},
+				}, nil
+			}
+		}
+		return nil, err
 	}
-
 	response := generated.PostPullRequestCreate201JSONResponse{
 		Pr: &generated.PullRequest{
 			PullRequestId:     createdPR.Id,
@@ -62,8 +86,6 @@ func (s *Server) PostPullRequestCreate(ctx context.Context, request generated.Po
 			AuthorId:          createdPR.AuthorId,
 			AssignedReviewers: createdPR.AssignedReviewers,
 			Status:            generated.PullRequestStatus(createdPR.Status),
-			CreatedAt:         &createdPR.CreatedAt,
-			MergedAt:          &createdPR.MergedAt,
 		},
 	}
 
@@ -71,20 +93,22 @@ func (s *Server) PostPullRequestCreate(ctx context.Context, request generated.Po
 }
 
 func (s *Server) GetTeamGet(ctx context.Context, request generated.GetTeamGetRequestObject) (generated.GetTeamGetResponseObject, error) {
-	// 1. Параметры запроса уже в `request.Params`
 	teamName := request.Params.TeamName
-
-	// 2. Вызываем сервис
 	team, users, err := s.teamService.TeamGet(ctx, teamName)
-	if err != nil {
-		// Обработка ошибки "не найдено"
-		// if errors.Is(err, domain.ErrTeamNotFound) {
-		//     return generated.GetTeamGet404JSONResponse{...}, nil
-		// }
-		return nil, err
+	var appErr *domain.AppError
+	if errors.As(err, &appErr) {
+		var response generated.GetTeamGet404JSONResponse
+		response = generated.GetTeamGet404JSONResponse{
+			Error: struct {
+				Code    generated.ErrorResponseErrorCode `json:"code"`
+				Message string                           `json:"message"`
+			}{
+				Code:    generated.ErrorResponseErrorCode(appErr.Code),
+				Message: appErr.Error(),
+			}}
+		return response, nil
 	}
 
-	// 3. Конвертируем результат в сгенерированные структуры и формируем ответ
 	members := make([]generated.TeamMember, 0, len(users))
 	for _, u := range users {
 		members = append(members, generated.TeamMember{
@@ -103,11 +127,93 @@ func (s *Server) GetTeamGet(ctx context.Context, request generated.GetTeamGetReq
 }
 
 func (s *Server) PostPullRequestMerge(ctx context.Context, request generated.PostPullRequestMergeRequestObject) (generated.PostPullRequestMergeResponseObject, error) {
-	return nil, fmt.Errorf("not implemented")
+	prId := request.Body.PullRequestId
+	pr, err := s.prService.Merge(ctx, prId)
+	if err != nil {
+		var appErr *domain.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errcodes.NotFound:
+				response := generated.PostPullRequestMerge404JSONResponse{
+					Error: struct {
+						Code    generated.ErrorResponseErrorCode `json:"code"`
+						Message string                           `json:"message"`
+					}{
+						Code:    generated.ErrorResponseErrorCode(appErr.Code),
+						Message: appErr.Error(),
+					}}
+				return response, nil
+			}
+		}
+	}
+	response := generated.PostPullRequestMerge200JSONResponse{
+		Pr: &generated.PullRequest{
+			AssignedReviewers: pr.AssignedReviewers,
+			AuthorId:          pr.AuthorId,
+			CreatedAt:         &pr.CreatedAt,
+			MergedAt:          pr.MergedAt,
+			PullRequestId:     pr.Id,
+			PullRequestName:   pr.Name,
+			Status:            generated.PullRequestStatus(pr.Status),
+		},
+	}
+	return response, nil
 }
 
 func (s *Server) PostPullRequestReassign(ctx context.Context, request generated.PostPullRequestReassignRequestObject) (generated.PostPullRequestReassignResponseObject, error) {
-	return nil, fmt.Errorf("not implemented")
+	prId := request.Body.PullRequestId
+	oldUserId := request.Body.OldUserId
+	pr, newId, err := s.prService.Reassign(ctx, prId, oldUserId)
+	if err != nil {
+		var appErr *domain.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errcodes.NotFound:
+				return generated.PostPullRequestReassign404JSONResponse{
+					Error: struct {
+						Code    generated.ErrorResponseErrorCode `json:"code"`
+						Message string                           `json:"message"`
+					}{Code: generated.NOTFOUND, Message: appErr.Message},
+				}, nil
+
+			case errcodes.PrMerged:
+				return generated.PostPullRequestReassign409JSONResponse{
+					Error: struct {
+						Code    generated.ErrorResponseErrorCode `json:"code"`
+						Message string                           `json:"message"`
+					}{Code: generated.PRMERGED, Message: appErr.Message},
+				}, nil
+			case errcodes.NotAssigned:
+				return generated.PostPullRequestReassign409JSONResponse{
+					Error: struct {
+						Code    generated.ErrorResponseErrorCode `json:"code"`
+						Message string                           `json:"message"`
+					}{Code: generated.NOTASSIGNED, Message: appErr.Message},
+				}, nil
+			case errcodes.NoCandidate:
+				return generated.PostPullRequestReassign409JSONResponse{
+					Error: struct {
+						Code    generated.ErrorResponseErrorCode `json:"code"`
+						Message string                           `json:"message"`
+					}{Code: generated.NOCANDIDATE, Message: appErr.Message},
+				}, nil
+			}
+		}
+		return nil, err
+	}
+	response := generated.PostPullRequestReassign200JSONResponse{
+		Pr: generated.PullRequest{
+			AssignedReviewers: pr.AssignedReviewers,
+			AuthorId:          pr.AuthorId,
+			CreatedAt:         &pr.CreatedAt,
+			MergedAt:          pr.MergedAt,
+			PullRequestId:     pr.Id,
+			PullRequestName:   pr.Name,
+			Status:            generated.PullRequestStatus(pr.Status),
+		},
+		ReplacedBy: newId,
+	}
+	return response, nil
 }
 
 func (s *Server) PostTeamAdd(ctx context.Context, request generated.PostTeamAddRequestObject) (generated.PostTeamAddResponseObject, error) {
@@ -143,19 +249,17 @@ func (s *Server) PostTeamAdd(ctx context.Context, request generated.PostTeamAddR
 	if err != nil {
 		var appErr *domain.AppError
 		if errors.As(err, &appErr) {
-			switch appErr.Code {
-			case errcodes.TeamAlreadyExists, errcodes.UserAlreadyExists:
-				response := generated.PostTeamAdd400JSONResponse{
-					Error: struct {
-						Code    generated.ErrorResponseErrorCode `json:"code"`
-						Message string                           `json:"message"`
-					}{
-						Code:    generated.ErrorResponseErrorCode(appErr.Code),
-						Message: appErr.Message,
-					},
-				}
-				return response, nil
+			response := generated.PostTeamAdd400JSONResponse{
+				Error: struct {
+					Code    generated.ErrorResponseErrorCode `json:"code"`
+					Message string                           `json:"message"`
+				}{
+					Code:    generated.ErrorResponseErrorCode(appErr.Code),
+					Message: appErr.Message,
+				},
 			}
+			return response, nil
+
 		}
 		return nil, err
 	}
@@ -175,14 +279,84 @@ func (s *Server) PostTeamAdd(ctx context.Context, request generated.PostTeamAddR
 			Members:  apiMembers,
 		},
 	}
+	return response, nil
+}
 
+func (s *Server) PostUsersSetIsActive(ctx context.Context, request generated.PostUsersSetIsActiveRequestObject) (generated.PostUsersSetIsActiveResponseObject, error) {
+	isActive := request.Body.IsActive
+	userId := request.Body.UserId
+	user, err := s.userService.SetIsActive(ctx, userId, isActive)
+	if err != nil {
+		var appErr *domain.AppError
+		if errors.As(err, &appErr) {
+			response := generated.PostUsersSetIsActive404JSONResponse{
+				Error: struct {
+					Code    generated.ErrorResponseErrorCode `json:"code"`
+					Message string                           `json:"message"`
+				}{
+					Code:    generated.ErrorResponseErrorCode(appErr.Code),
+					Message: appErr.Message,
+				},
+			}
+			return response, nil
+		}
+		return nil, err
+	}
+	response := generated.PostUsersSetIsActive200JSONResponse{
+		User: &generated.User{
+			UserId:   user.Id,
+			Username: user.Name,
+			TeamName: user.Team,
+			IsActive: user.IsActive,
+		},
+	}
 	return response, nil
 }
 
 func (s *Server) GetUsersGetReview(ctx context.Context, request generated.GetUsersGetReviewRequestObject) (generated.GetUsersGetReviewResponseObject, error) {
-	return nil, fmt.Errorf("not implemented")
+	userId := request.Params.UserId
+	prs, err := s.userService.GetUserReviews(ctx, userId)
+	if err != nil {
+		var appErr *domain.AppError
+		if errors.As(err, &appErr) {
+			return nil, errors.New(appErr.Message)
+		}
+	}
+	var response generated.GetUsersGetReview200JSONResponse
+	response.UserId = userId
+	for _, pr := range prs {
+		response.PullRequests = append(response.PullRequests, generated.PullRequestShort{
+			AuthorId:        pr.AuthorId,
+			PullRequestId:   pr.Id,
+			PullRequestName: pr.Name,
+			Status:          generated.PullRequestShortStatus(pr.Status),
+		})
+	}
+	return response, nil
 }
 
-func (s *Server) PostUsersSetIsActive(ctx context.Context, request generated.PostUsersSetIsActiveRequestObject) (generated.PostUsersSetIsActiveResponseObject, error) {
-	return nil, fmt.Errorf("not implemented")
+func (s *Server) GetUserStats(ctx context.Context, request generated.GetUserStatsRequestObject) (
+	generated.GetUserStatsResponseObject, error) {
+
+	// Вызываем сервис, получаем наши доменные сущности
+	stats, err := s.statsService.GetUserAssignmentStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	apiStats := make([]generated.UserAssignmentStat, 0, len(stats))
+
+	for _, stat := range stats {
+		apiStats = append(apiStats, generated.UserAssignmentStat{
+			AssignmentCount: int32(stat.AssignmentCount),
+			UserId:          stat.UserID,
+			Username:        stat.Username,
+		})
+	}
+
+	response := generated.GetUserStats200JSONResponse{
+		AssignmentsByUser: &apiStats,
+	}
+
+	return response, nil
 }

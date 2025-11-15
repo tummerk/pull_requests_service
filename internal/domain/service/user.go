@@ -11,6 +11,8 @@ type UserRepository interface {
 	SetIsActive(ctx context.Context, userId string, isActive bool) (entity.User, error)
 	GetById(ctx context.Context, userId string) (entity.User, error)
 	GetActiveTeamCandidatesId(ctx context.Context, authorID string) ([]string, error)
+	GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error)
+	GetUserAssignmentStats(ctx context.Context) ([]entity.UserAssignmentStat, error)
 }
 
 type UserService struct {
@@ -23,14 +25,10 @@ func NewUserService(repository UserRepository) *UserService {
 	}
 }
 
-func (s *UserService) CreateUser(ctx context.Context, user entity.User) (entity.User, error) {
-	return s.repository.Create(ctx, user)
-}
-
-func (s *UserService) GetByTeam(ctx context.Context, team string) ([]entity.User, error) {
-	return s.repository.GetByTeam(ctx, team)
-}
-
 func (s *UserService) SetIsActive(ctx context.Context, userId string, isActive bool) (entity.User, error) {
 	return s.repository.SetIsActive(ctx, userId, isActive)
+}
+
+func (s *UserService) GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error) {
+	return s.repository.GetUserReviews(ctx, userId)
 }
