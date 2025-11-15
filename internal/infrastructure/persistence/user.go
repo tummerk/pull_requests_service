@@ -147,33 +147,6 @@ func (r *UserRepository) GetActiveTeamCandidatesId(ctx context.Context, authorID
 	return candidateIDs, nil
 }
 
-func (r *UserRepository) GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error) {
-	const query = `
-        SELECT
-            pr.id,
-            pr.name,
-            pr.author_id,
-            pr.status
-        FROM
-            pull_requests pr
-        WHERE
-            EXISTS (
-                SELECT 1
-                FROM pr_reviewers r
-                WHERE r.pull_request_id = pr.id AND r.reviewer_id = $1
-            )
-    `
-
-	var reviews []entity.PullRequest
-
-	err := r.db.SelectContext(ctx, &reviews, query, userId)
-	if err != nil {
-		return nil, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to get user reviews")
-	}
-
-	return reviews, nil
-}
-
 func (r *UserRepository) GetUserAssignmentStats(ctx context.Context) ([]entity.UserAssignmentStat, error) {
 	const query = `
         SELECT

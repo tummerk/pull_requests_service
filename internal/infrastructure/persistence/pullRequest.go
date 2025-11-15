@@ -76,9 +76,14 @@ func (r *PullRequestRepository) CreateWithReviewers(ctx context.Context, pr *ent
 
 func (r *PullRequestRepository) Merge(ctx context.Context, prId string) (entity.PullRequest, error) {
 	var pr entity.PullRequest
+
 	queryUpdate := `
 		UPDATE pull_requests
-		SET status = $1, updated_at = NOW(), merged_at = NOW()
+		SET 
+			status = $1, 
+			updated_at = NOW(), 
+			merged_at = NOW(),
+			need_more_reviewers = FALSE 
 		WHERE id = $2
 		RETURNING id, name, author_id, status, need_more_reviewers, created_at, merged_at;`
 
@@ -95,7 +100,6 @@ func (r *PullRequestRepository) Merge(ctx context.Context, prId string) (entity.
 	}
 
 	reviewersQuery := `SELECT reviewer_id FROM pr_reviewers WHERE pull_request_id = $1`
-
 	err = r.db.SelectContext(ctx, &pr.AssignedReviewers, reviewersQuery, prId)
 	if err != nil {
 		return entity.PullRequest{}, domain.WrapError(err, errcodes.InternalServerError,
@@ -104,7 +108,6 @@ func (r *PullRequestRepository) Merge(ctx context.Context, prId string) (entity.
 
 	return pr, nil
 }
-
 func (r *PullRequestRepository) Reassign(ctx context.Context, prId, oldReviewerId string) (
 	entity.PullRequest, string, error) {
 
@@ -199,4 +202,160 @@ func (r *PullRequestRepository) Reassign(ctx context.Context, prId, oldReviewerI
 	}
 
 	return pr, newReviewerId, nil
+}
+
+func (r *PullRequestRepository) GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error) {
+	const query = `
+        SELECT
+            pr.id,
+            pr.name,
+            pr.author_id,
+            pr.status
+        FROM
+            pull_requests pr
+        WHERE
+            EXISTS (
+                SELECT 1
+                FROM pr_reviewers r
+                WHERE r.pull_request_id = pr.id AND r.reviewer_id = $1
+            )
+    `
+
+	var reviews []entity.PullRequest
+
+	err := r.db.SelectContext(ctx, &reviews, query, userId)
+	if err != nil {
+		return nil, domain.WrapError(err, errcodes.InternalServerError, "repository: failed to get user reviews")
+	}
+
+	return reviews, nil
+}
+
+func (r *PullRequestRepository) AssignToNeedyPRs(ctx context.Context, userID string) error {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return domain.WrapError(err, errcodes.InternalServerError, "failed to begin transaction")
+	}
+	defer tx.Rollback()
+
+	const findPRsQuery = `
+        SELECT
+            pr.id
+        FROM
+            pull_requests pr
+        WHERE
+            pr.status = 'OPEN'
+            AND pr.need_more_reviewers = TRUE
+            AND pr.author_id != $1 
+            AND pr.id IN (
+                SELECT p.id
+                FROM pull_requests p
+                JOIN users author ON p.author_id = author.id
+                WHERE author.team_id = (SELECT team_id FROM users WHERE id = $1)
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM pr_reviewers r WHERE r.pull_request_id = pr.id AND r.reviewer_id = $1
+            )
+        FOR UPDATE; 
+    `
+
+	var prIDsToProcess []string
+	if err = tx.SelectContext(ctx, &prIDsToProcess, findPRsQuery, userID); err != nil {
+		return domain.WrapError(err, errcodes.InternalServerError, "worker: failed to find needy pull requests")
+	}
+
+	if len(prIDsToProcess) == 0 {
+		return tx.Commit()
+	}
+
+	const maxReviewers = 2
+
+	for _, prID := range prIDsToProcess {
+		var currentReviewerCount int
+		countQuery := `SELECT COUNT(*) FROM pr_reviewers WHERE pull_request_id = $1`
+		if err = tx.GetContext(ctx, &currentReviewerCount, countQuery, prID); err != nil {
+			return domain.WrapError(err, errcodes.InternalServerError, "worker: failed to count current reviewers")
+		}
+
+		if currentReviewerCount >= maxReviewers {
+			updateFlagQuery := `UPDATE pull_requests SET need_more_reviewers = FALSE, updated_at = NOW() WHERE id = $1`
+			if _, updateErr := tx.ExecContext(ctx, updateFlagQuery, prID); updateErr != nil {
+				return domain.WrapError(updateErr, errcodes.InternalServerError, "worker: failed to fix flag on full PR")
+			}
+			continue
+		}
+
+		assignQuery := `INSERT INTO pr_reviewers (pull_request_id, reviewer_id) VALUES ($1, $2)`
+		if _, insertErr := tx.ExecContext(ctx, assignQuery, prID, userID); insertErr != nil {
+			return domain.WrapError(insertErr, errcodes.InternalServerError, "worker: failed to assign new reviewer")
+		}
+
+		newReviewerCount := currentReviewerCount + 1
+		needsMore := newReviewerCount < maxReviewers
+
+		updateFlagQuery := `UPDATE pull_requests SET need_more_reviewers = $1, updated_at = NOW() WHERE id = $2`
+		if _, updateErr := tx.ExecContext(ctx, updateFlagQuery, needsMore, prID); updateErr != nil {
+			return domain.WrapError(updateErr, errcodes.InternalServerError, "worker: failed to update PR flag")
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (r *PullRequestRepository) ReassignFromAllPRs(ctx context.Context, userID string) error {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return domain.WrapError(err, errcodes.InternalServerError, "failed to begin transaction")
+	}
+	defer tx.Rollback()
+
+	const deleteAndGetPRsQuery = `
+        DELETE FROM pr_reviewers
+        WHERE reviewer_id = $1
+          AND pull_request_id IN (
+              SELECT id FROM pull_requests WHERE status = 'OPEN'
+          )
+        RETURNING pull_request_id;
+    `
+	var affectedPRs []string
+	if err = tx.SelectContext(ctx, &affectedPRs, deleteAndGetPRsQuery, userID); err != nil {
+		return domain.WrapError(err, errcodes.InternalServerError, "worker: failed to delete assignments and get affected PRs")
+	}
+
+	if len(affectedPRs) == 0 {
+		return tx.Commit()
+	}
+
+	for _, prID := range affectedPRs {
+		findReviewerQuery := `
+            SELECT u.id FROM users u
+            WHERE u.is_active = TRUE
+              AND u.team_id = (SELECT author.team_id FROM users author JOIN pull_requests pr ON author.id = pr.author_id WHERE pr.id = $1)
+              AND u.id != (SELECT author_id FROM pull_requests WHERE id = $1)
+              AND u.id NOT IN (SELECT reviewer_id FROM pr_reviewers WHERE pull_request_id = $1)
+            ORDER BY RANDOM() LIMIT 1
+        `
+		var newReviewerId string
+		err = tx.GetContext(ctx, &newReviewerId, findReviewerQuery, prID)
+
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				updateFlagQuery := `UPDATE pull_requests SET need_more_reviewers = TRUE, updated_at = NOW() WHERE id = $1`
+				if _, updateErr := tx.ExecContext(ctx, updateFlagQuery, prID); updateErr != nil {
+					return domain.WrapError(updateErr, errcodes.InternalServerError, "worker: failed to mark PR as needy")
+				}
+			} else {
+				return domain.WrapError(err, errcodes.InternalServerError, "worker: failed to find replacement")
+			}
+		} else {
+			assignQuery := `INSERT INTO pr_reviewers (pull_request_id, reviewer_id) VALUES ($1, $2)`
+			if _, insertErr := tx.ExecContext(ctx, assignQuery, prID, newReviewerId); insertErr != nil {
+				return domain.WrapError(insertErr, errcodes.InternalServerError, "worker: failed to assign new reviewer")
+			}
+			if _, updateErr := tx.ExecContext(ctx, `UPDATE pull_requests SET updated_at = NOW() WHERE id = $1`, prID); updateErr != nil {
+				return domain.WrapError(updateErr, errcodes.InternalServerError, "worker: failed to touch PR on reassign")
+			}
+		}
+	}
+	return tx.Commit()
 }

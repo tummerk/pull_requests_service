@@ -5,7 +5,6 @@ import (
 	"errors"
 	"golang.org/x/sync/errgroup"
 	"log/slog"
-	"net"
 	"net/http"
 	"os/signal"
 	"pull_requests_service/internal/config"
@@ -96,15 +95,22 @@ func (app App) Run() error {
 	app.teamRepo = persistence.NewTeamRepository(client)
 	app.prRepo = persistence.NewPullRequestRepository(client)
 
-	app.userService = service.NewUserService(app.userRepo)
+	jobs := make(chan service.PrWorkerJob, 100)
+
+	app.userService = service.NewUserService(app.userRepo, jobs)
 	app.teamService = service.NewTeamService(app.teamRepo, app.userRepo)
-	app.prService = service.NewPullRequestService(app.userRepo, app.prRepo)
+	app.prService = service.NewPullRequestService(app.userRepo, app.prRepo, jobs)
 	app.statService = service.NewStatisticsService(app.userRepo)
 
 	g, gCtx := errgroup.WithContext(ctx)
 
 	httpSrv := app.newHTTPServer(gCtx)
 	app.httpServer.Run(gCtx, g, httpSrv)
+
+	g.Go(func() error {
+		app.prService.StartEventWorker(gCtx)
+		return nil
+	})
 
 	if err = g.Wait(); err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
@@ -135,9 +141,6 @@ func (app App) newHTTPServer(ctx context.Context) *http.Server { //nolint:funlen
 
 	return &http.Server{
 		//nolint:exhaustruct
-		BaseContext: func(net.Listener) context.Context {
-			return ctx
-		},
 		Addr:              app.cfg.HTTP.ListenAddress,
 		WriteTimeout:      app.cfg.HTTP.WriteTimeout,
 		ReadTimeout:       app.cfg.HTTP.ReadTimeout,

@@ -13,6 +13,7 @@ type PullRequestService interface {
 	CreatePullRequest(ctx context.Context, pr entity.PullRequest) (entity.PullRequest, error)
 	Merge(ctx context.Context, prId string) (entity.PullRequest, error)
 	Reassign(ctx context.Context, prId string, oldReviewerId string) (entity.PullRequest, string, error)
+	GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error)
 }
 
 // TeamService определяет бизнес-логику для работы с командами и их участниками.
@@ -24,7 +25,6 @@ type TeamService interface {
 // UserService определяет бизнес-логику для работы с пользователями.
 type UserService interface {
 	SetIsActive(ctx context.Context, userId string, isActive bool) (entity.User, error)
-	GetUserReviews(ctx context.Context, userId string) ([]entity.PullRequest, error)
 }
 
 type StatsService interface {
@@ -315,11 +315,11 @@ func (s *Server) PostUsersSetIsActive(ctx context.Context, request generated.Pos
 
 func (s *Server) GetUsersGetReview(ctx context.Context, request generated.GetUsersGetReviewRequestObject) (generated.GetUsersGetReviewResponseObject, error) {
 	userId := request.Params.UserId
-	prs, err := s.userService.GetUserReviews(ctx, userId)
+	prs, err := s.prService.GetUserReviews(ctx, userId)
 	if err != nil {
 		var appErr *domain.AppError
 		if errors.As(err, &appErr) {
-			return nil, errors.New(appErr.Message)
+			return nil, err
 		}
 	}
 	var response generated.GetUsersGetReview200JSONResponse
@@ -335,10 +335,10 @@ func (s *Server) GetUsersGetReview(ctx context.Context, request generated.GetUse
 	return response, nil
 }
 
+// статистика по кол-ву назначений пользователей
 func (s *Server) GetUserStats(ctx context.Context, request generated.GetUserStatsRequestObject) (
 	generated.GetUserStatsResponseObject, error) {
 
-	// Вызываем сервис, получаем наши доменные сущности
 	stats, err := s.statsService.GetUserAssignmentStats(ctx)
 	if err != nil {
 		return nil, err
